@@ -1,0 +1,391 @@
+---
+title: "Cohort Simulation - Selection Bias"
+subtitle: "Random Uniform Bias Adjustment"
+author: Huda Bashir
+date: "Last compiled on `r format(Sys.Date(), '%B %d, %Y')`"
+format: html
+embed-resources: true
+self-contained: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+#| message: false
+library(dplyr)
+library(tidyverse)
+library(future)
+library(future.apply)
+library(ggpubr)
+```
+```{r}
+# # Target population parameters
+# RR <- 2 # This is the estimand. Combined with baseline risk, determines risk in the exposed
+# baserisk <- 0.01 # Baseline risk in the unexposed
+# prevE <- 0.2 # Exposure prevalence in the target population
+# niter <- 100000 # simulating 1,000,000 iterations
+# ssize <- 40000 # sample size = 40,000 (100x # cases, 390 cases, ~ 400)
+# prD1E1 <- 0.75
+# prD1E0 <- 0.95
+# prD0E1 <- 0.82
+# prD0E0 <- 0.88
+# nsubiter <- 1000
+```
+## Writing a function (SIM_FUN) for the simulation
+```{r}
+SIM_FUN <- function(niter, ssize, RR, prevE, baserisk, prD1E1, prD1E0, prD0E1, prD0E0, nsubiter) {
+  
+  #### COHORT SIMULATION DATA GENERATION
+  E1 <- rbinom(niter, ssize, prevE) # total exposed
+  E0 <- ssize - E1 # total unexposed
+  D1E1 <- rbinom(niter, E1, RR*baserisk) # exposed cases
+  D1E0 <- rbinom(niter, E0, baserisk) # unexposed cases
+  
+  #### CALCULATING TRUE RR ESTIMATE FOR COHORT
+  RR1 <- (D1E1/E1)/(D1E0/E0)
+  
+  #### DATA GENERATION FOR CASE-COHORT ESTIMATE
+  D0 <- (D1E1 + D1E0)*2 # 2 controls per case
+  D0E1 <- rbinom(niter, D0, prevE) # exposed controls
+  D0E0 <- D0 - D0E1 # unexposed controls
+  
+  #### CALCULATING OR ESTIMATE FOR CASE-COHORT
+  OR <- (D1E1/D0E1)/(D1E0/D0E0)
+  L_SERR <- sqrt(1/D1E1+1/D0E1+1/D1E0+1/D0E0)
+  ME_OR <- qnorm(0.975)*L_SERR
+  LCL95 <- OR*exp(-ME_OR)
+  UCL95 <- OR*exp(ME_OR)
+  MSE <- mean((log(OR) - log(RR))^2)
+  coverage <- ifelse(LCL95 <= RR & UCL95 >= RR, 1, 0)
+  
+  #### EXPOSURE PREVALENCE CASES AND CONTROLS
+  prevE_D1 <- D1E1/(D1E1+D1E0)
+  prevE_D0 <- D0E1/(D0E1+D0E0)
+
+  #### DATA GENERATION FOR BIASED ESTIMATE
+  pD1E1 <- rbinom(niter, D1E1, prD1E1)
+  pD1E0 <- rbinom(niter, D1E0, prD1E0)
+  pD0E1 <- rbinom(niter, D0E1, prD0E1)
+  pD0E0 <- rbinom(niter, D0E0, prD0E0)
+  
+  #### CALCULATING BIASED OR ESTIMATE
+  OR_b <- (pD1E1/pD0E1)/(pD1E0/pD0E0) 
+  median(OR_b)
+  L_SERR_b <- sqrt(1/pD1E1+1/pD0E1+1/pD1E0+1/pD0E0)
+  ME_OR_b <- qnorm(0.975)*L_SERR_b
+  LCL95_b <- OR_b*exp(-ME_OR_b)
+  UCL95_b <- OR_b*exp(ME_OR_b)
+  MSE_b <- mean((log(OR_b) - log(RR))^2)
+  coverage_b <- ifelse(LCL95_b <= RR & UCL95_b >= RR, 1, 0)
+  
+  #### DATA GENERATION FOR RANDOM UNIFORM ADJUSTMENT
+  ## TOTAL NON-PARTICIPATING CASES & CONTROLS BY EXPOSURE STATUS
+  npD1E1 <- D1E1-pD1E1
+  npD1E0 <- D1E0-pD1E0
+  npD0E1 <- D0E1-pD0E1
+  npD0E0 <- D0E0-pD0E0
+  
+  ## TOTAL NON-PARTICIPATING CASES & CONTROLS
+  npD1 <- npD1E1 + npD1E0
+  npD0 <- npD0E1 + npD0E0
+  
+  ## EXPOSURE PREVALENCE NON-PARTICIPATING CASES & CONTROLS
+  prevE_np_D1 <- npD1E1/npD1
+  prevE_np_D0 <- npD0E1/npD0
+  
+  ## EXPOSURE PREVALENCE PARTICIPATING CASES & CONTROLS
+  prevE_p_D1 <- pD1E1/(pD1E1 + pD1E0)
+  prevE_p_D0 <- pD0E1/(pD0E1 + pD0E0)
+  
+  ## SET UP PARALLEL PROCESSING
+  plan(multisession, workers = parallel::detectCores() - 1)
+
+  #### FIRST ADJUSTED ESTIMATE
+  CL95_list_a1 <- future_lapply(1:niter, function(i) {
+    
+    #### EXPOSURE PREVALENCE - NON-PARTICIPATING CASES - TRUNCATED RANDOM UNIFORM
+    prevE_np_D1_r1 <- runif(nsubiter, min = prevE_np_D1[i]-.01, max = prevE_np_D1[i]+.01)
+    prevE_np_D0_r1 <- runif(nsubiter, min = prevE_np_D0[i]-.01, max = prevE_np_D0[i]+.01)
+    
+    npD1E1_a1 <- rbinom(nsubiter, npD1[i], prevE_np_D1_r1) # NONPARTICIPATING EXPOSED CASES
+    npD1E0_a1 <- npD1[i] - npD1E1_a1 # NONPARTICIPATING UNEXPOSED CASES
+    npD0E1_a1 <- rbinom(nsubiter, npD0[i], prevE_np_D0_r1) # NONPARTICIPATING EXPOSED CONTROLS
+    npD0E0_a1 <- npD0[i] - npD0E1_a1 # NONPARTICIPATING UNEXPOSED CONTROLS
+    
+    #### CALCULATING BIAS-ADJUSTED OR FOR RANDOM UNIFORM
+    OR_a1_vec <- ((pD1E1[i] + npD1E1_a1) / (pD1E0[i] + npD1E0_a1)) / 
+                ((pD0E1[i] + npD0E1_a1) / (pD0E0[i] + npD0E0_a1))
+    L_SERR_a1 <- sqrt((1/(pD1E1[i]))+(1/(pD1E0[i])) + 
+                             (1/(pD0E1[i])) + (1/(pD0E0[i])))
+    OR_a1_vec <- exp(log(OR_a1_vec) + rnorm(nsubiter) * L_SERR_a1)
+    
+    #### CALCULATE 95% SI
+    quantiles1 <- quantile(OR_a1_vec, probs=c(0.025, 0.5, 0.975))
+    c(quantiles1, ifelse(quantiles1[1] <= RR & quantiles1[3] >= RR, 1, 0))
+    
+  }, future.seed = TRUE)
+  
+  CL95_a1 <- do.call(rbind, CL95_list_a1)
+  
+  #### SECOND ADJUSTED ESTIMATE
+  CL95_list_a2 <- future_lapply(1:niter, function(i) {
+    
+    #### EXPOSURE PREVALENCE - PARTICIPATING CASES - TRUNCATED RANDOM UNIFORM
+    prevE_np_D1_r2 <- runif(nsubiter, min = prevE_p_D1[i]-.01, max = prevE_p_D1[i]+.01)
+    prevE_np_D0_r2 <- runif(nsubiter, min = prevE_p_D0[i]-.01, max = prevE_p_D0[i]+.01)
+    
+    npD1E1_a2 <- rbinom(nsubiter, npD1[i], prevE_np_D1_r2) # NONPARTICIPATING EXPOSED CASES
+    npD1E0_a2 <- npD1[i] - npD1E1_a2 # NONPARTICIPATING UNEXPOSED CASES
+    npD0E1_a2 <- rbinom(nsubiter, npD0[i], prevE_np_D0_r2) # NONPARTICIPATING EXPOSED CONTROLS
+    npD0E0_a2 <- npD0[i] - npD0E1_a2 # NONPARTICIPATING UNEXPOSED CONTROLS
+    
+    #### CALCULATING BIAS-ADJUSTED OR FOR RANDOM UNIFORM
+    OR_a2_vec <- ((pD1E1[i] + npD1E1_a2) / (pD1E0[i] + npD1E0_a2)) / 
+                ((pD0E1[i] + npD0E1_a2) / (pD0E0[i] + npD0E0_a2))
+    L_SERR_a2 <- sqrt((1/(pD1E1[i]))+(1/(pD1E0[i])) + 
+                             (1/(pD0E1[i])) + (1/(pD0E0[i])))
+    OR_a2_vec <- exp(log(OR_a2_vec) + rnorm(nsubiter) * L_SERR_a2)
+    
+    #### CALCULATE 95% SI
+    quantiles2 <- quantile(OR_a2_vec, probs=c(0.025, 0.5, 0.975))
+    c(quantiles2, ifelse(quantiles2[1] <= RR & quantiles2[3] >= RR, 1, 0))
+    
+  }, future.seed = TRUE)
+  
+  CL95_a2 <- do.call(rbind, CL95_list_a2)
+  
+  #### THIRD ADJUSTED ESTIMATE
+  CL95_list_a3 <- future_lapply(1:niter, function(i) {
+    
+    #### EXPOSURE PREVALENCE - 0-1 RANDOM UNIFORM
+    prevE_np_D1_r3 <- runif(nsubiter, min = 0, max = 1)
+    prevE_np_D0_r3 <- runif(nsubiter, min = 0, max = 1)
+    
+    npD1E1_a3 <- rbinom(nsubiter, npD1[i], prevE_np_D1_r3) # NONPARTICIPATING EXPOSED CASES
+    npD1E0_a3 <- npD1[i] - npD1E1_a3 # NONPARTICIPATING UNEXPOSED CASES
+    npD0E1_a3 <- rbinom(nsubiter, npD0[i], prevE_np_D0_r3) # NONPARTICIPATING EXPOSED CONTROLS
+    npD0E0_a3 <- npD0[i] - npD0E1_a3 # NONPARTICIPATING UNEXPOSED CONTROLS
+    
+    #### CALCULATING BIAS-ADJUSTED OR FOR RANDOM UNIFORM
+    OR_a3_vec <- ((pD1E1[i] + npD1E1_a3) / (pD1E0[i] + npD1E0_a3)) / 
+                ((pD0E1[i] + npD0E1_a3) / (pD0E0[i] + npD0E0_a3))
+    L_SERR_a3 <- sqrt((1/(pD1E1[i]))+(1/(pD1E0[i])) + 
+                             (1/(pD0E1[i])) + (1/(pD0E0[i])))
+    OR_a3_vec <- exp(log(OR_a3_vec) + rnorm(nsubiter) * L_SERR_a3)
+    
+    #### CALCULATE 95% SI
+    quantiles3 <- quantile(OR_a3_vec, probs=c(0.025, 0.5, 0.975))
+    c(quantiles3, ifelse(quantiles3[1] <= RR & quantiles3[3] >= RR, 1, 0))
+    
+  }, future.seed = TRUE)
+  
+  CL95_a3 <- do.call(rbind, CL95_list_a3)
+  
+  
+  #### FOURTH ADJUSTED ESTIMATE
+  CL95_list_a4 <- future_lapply(1:niter, function(i) {
+    
+    #### EXPOSURE PREVALENCE - TRUNCATED RANDOM UNIFORM (0.1-0.4)
+    prevE_np_D1_r4 <- runif(nsubiter, min = 0.1, max = 0.4)
+    prevE_np_D0_r4 <- runif(nsubiter, min = 0.1, max = 0.4)
+    
+    npD1E1_a4 <- rbinom(nsubiter, npD1[i], prevE_np_D1_r4) # NONPARTICIPATING EXPOSED CASES
+    npD1E0_a4 <- npD1[i] - npD1E1_a4 # NONPARTICIPATING UNEXPOSED CASES
+    npD0E1_a4 <- rbinom(nsubiter, npD0[i], prevE_np_D0_r4) # NONPARTICIPATING EXPOSED CONTROLS
+    npD0E0_a4 <- npD0[i] - npD0E1_a4 # NONPARTICIPATING UNEXPOSED CONTROLS
+    
+    #### CALCULATING BIAS-ADJUSTED OR FOR RANDOM UNIFORM
+    OR_a4_vec <- ((pD1E1[i] + npD1E1_a4) / (pD1E0[i] + npD1E0_a4)) / 
+                ((pD0E1[i] + npD0E1_a4) / (pD0E0[i] + npD0E0_a4))
+    L_SERR_a4 <- sqrt((1/(pD1E1[i]))+(1/(pD1E0[i])) + 
+                             (1/(pD0E1[i])) + (1/(pD0E0[i])))
+    OR_a4_vec <- exp(log(OR_a4_vec) + rnorm(nsubiter) * L_SERR_a4)
+    
+    #### CALCULATE 95% SI
+    quantiles4 <- quantile(OR_a4_vec, probs=c(0.025, 0.5, 0.975))
+    c(quantiles4, ifelse(quantiles4[1] <= RR & quantiles4[3] >= RR, 1, 0))
+    
+  }, future.seed = TRUE)
+  
+  CL95_a4 <- do.call(rbind, CL95_list_a4)
+  
+  ## SAVING RESULTS
+  res <- data.frame(RR1, OR, LCL95, UCL95, MSE, coverage, OR_b, LCL95_b, UCL95_b, MSE_b, coverage_b, prevE_D1, prevE_D0, prevE_p_D1, prevE_p_D0, prevE_np_D1, prevE_np_D0)
+  res_a1 <- as.data.frame(CL95_a1)
+  colnames(res_a1) <- c("LCL95_a", "median_OR_a", "UCL95_a","coverage_a")
+  res_a2 <- as.data.frame(CL95_a2)
+  colnames(res_a2) <- c("LCL95_a", "median_OR_a", "UCL95_a", "coverage_a")
+  res_a3 <- as.data.frame(CL95_a3)
+  colnames(res_a3) <- c("LCL95_a", "median_OR_a", "UCL95_a", "coverage_a")
+  res_a4 <- as.data.frame(CL95_a4)
+  colnames(res_a4) <- c("LCL95_a", "median_OR_a", "UCL95_a", "coverage_a")
+
+  return(list(res = res, res_a1 = res_a1, res_a2 = res_a2, res_a3 = res_a3, res_a4 = res_a4))
+}
+```
+## Simulation 1
+Cases: Marginal = 85%
+- D1E1 = 75%
+- D1E0 = 95%
+
+Controls: Marginal = 85%
+- D0E1 = 82%
+- D0E0 = 88%
+```{r}
+true_RR = 2
+set.seed(seed = 23) 
+sim1 <- SIM_FUN(niter = 100000, ssize = 40000, RR = 2, prevE = 0.2, baserisk = 0.01, prD1E1 = 0.75, prD1E0 = 0.95, prD0E1 = 0.82, prD0E0 = 0.88, nsubiter = 10000)
+
+sim1_res <- sim1$res
+sim1_res_a1 <- sim1$res_a1
+sim1_res_a2 <- sim1$res_a2
+sim1_res_a3 <- sim1$res_a3
+sim1_res_a4 <- sim1$res_a4
+
+## summary of exposure prevalences
+# case-cohort
+summary(sim1_res$prevE_D1)
+summary(sim1_res$prevE_D0)
+# participants only
+summary(sim1_res$prevE_p_D1)
+summary(sim1_res$prevE_p_D0)
+# non-participants
+summary(sim1_res$prevE_np_D1)
+summary(sim1_res$prevE_np_D0)
+
+## true OR
+summary(sim1_res$OR)
+sim1_median_OR <- median(sim1_res$OR)
+quantile(sim1_res$OR, probs=c(0.025, 0.5, 0.975))
+median(sim1_res$MSE)
+sim1_MSE <- median(sim1_res$MSE)
+sum(sim1_res$coverage)/length(sim1_res$coverage)
+sim1_coverage <- sum(sim1_res$coverage)/length(sim1_res$coverage)
+
+## biased OR
+summary(sim1_res$OR_b)
+sim1_median_OR_b <- median(sim1_res$OR_b)
+quantile(sim1_res$OR_b, probs=c(0.025, 0.5, 0.975))
+median(sim1_res$MSE_b)
+sim1_MSE_b <- median(sim1_res$MSE_b)
+sum(sim1_res$coverage_b)/length(sim1_res$coverage_b)
+sim1_coverage_b <- sum(sim1_res$coverage_b)/length(sim1_res$coverage_b)
+
+## random uniform (bounded by prevE_np_D1 & prevE_np_D0)
+summary(sim1_res_a1$median_OR_a)
+sim1_median_OR_a1 <- median(sim1_res_a1$median_OR_a)
+quantile(sim1_res_a1$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim1_MSE_a1 <- (mean((log(sim1_res_a1$median_OR_a) - log(true_RR))^2))
+sim1_MSE_a1
+sum(sim1_res_a1$coverage_a)/length(sim1_res_a1$coverage_a)
+sim1_coverage_a1 <- sum(sim1_res_a1$coverage_a)/length(sim1_res_a1$coverage_a)
+
+## random uniform (bounded by prevE_p_1 & prevE_p_D0)
+summary(sim1_res_a2$median_OR_a)
+sim1_median_OR_a2 <- median(sim1_res_a2$median_OR_a)
+quantile(sim1_res_a2$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim1_MSE_a2 <- (mean((log(sim1_res_a2$median_OR_a) - log(true_RR))^2))
+sim1_MSE_a2
+sum(sim1_res_a2$coverage_a)/length(sim1_res_a2$coverage_a)
+sim1_coverage_a2 <-sum(sim1_res_a2$coverage_a)/length(sim1_res_a2$coverage_a)
+
+## random uniform (0-1)
+summary(sim1_res_a3$median_OR_a)
+sim1_median_OR_a3 <- median(sim1_res_a3$median_OR_a)
+quantile(sim1_res_a3$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim1_MSE_a3 <- (mean((log(sim1_res_a3$median_OR_a) - log(true_RR))^2))
+sim1_MSE_a3
+sum(sim1_res_a3$coverage_a)/length(sim1_res_a3$coverage_a)
+sim1_coverage_a3 <-sum(sim1_res_a3$coverage_a)/length(sim1_res_a3$coverage_a)
+
+## random uniform (0.1-0.4)
+summary(sim1_res_a4$median_OR_a)
+sim1_median_OR_a4 <- median(sim1_res_a4$median_OR_a)
+quantile(sim1_res_a4$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim1_MSE_a4 <- (mean((log(sim1_res_a4$median_OR_a) - log(true_RR))^2))
+sim1_MSE_a4
+sum(sim1_res_a4$coverage_a)/length(sim1_res_a4$coverage_a)
+sim1_coverage_a4 <-sum(sim1_res_a4$coverage_a)/length(sim1_res_a4$coverage_a)
+```
+## Simulation 2
+Cases: Marginal = 85%
+- D1E1 = 82%
+- D1E0 = 88%
+Controls: Marginal = 85%
+- D0E1 = 75%
+- D0E0 = 95%
+```{r}
+set.seed(seed = 23) 
+sim2 <- SIM_FUN(niter = 100000, ssize = 40000, RR = 2, prevE = 0.2, baserisk = 0.01 , prD1E1 = 0.82, prD1E0 = 0.88, prD0E1 = 0.75, prD0E0 = 0.95, nsubiter = 10000)
+
+sim2_res <- sim2$res
+sim2_res_a1 <- sim2$res_a1
+sim2_res_a2 <- sim2$res_a2
+sim2_res_a3 <- sim2$res_a3
+sim2_res_a4 <- sim2$res_a4
+
+## summary of exposure prevalences
+# case-cohort
+summary(sim2_res$prevE_D1)
+summary(sim2_res$prevE_D0)
+# participants only
+summary(sim2_res$prevE_p_D1)
+summary(sim2_res$prevE_p_D0)
+# non-participants
+summary(sim2_res$prevE_np_D1)
+summary(sim2_res$prevE_np_D0)
+
+## true OR
+summary(sim2_res$OR)
+sim2_median_OR <- median(sim2_res$OR)
+quantile(sim2_res$OR, probs=c(0.025, 0.5, 0.975))
+median(sim2_res$MSE)
+sim2_MSE <- median(sim2_res$MSE)
+sum(sim2_res$coverage)/length(sim2_res$coverage)
+sim2_coverage <- sum(sim2_res$coverage)/length(sim2_res$coverage)
+
+## biased OR
+summary(sim2_res$OR_b)
+sim2_median_OR_b <- median(sim2_res$OR_b)
+quantile(sim2_res$OR_b, probs=c(0.025, 0.5, 0.975))
+median(sim2_res$MSE_b)
+sim2_MSE_b <- median(sim2_res$MSE_b)
+sum(sim2_res$coverage_b)/length(sim2_res$coverage_b)
+sim2_coverage_b <- sum(sim2_res$coverage_b)/length(sim2_res$coverage_b)
+
+## random uniform (bounded by & prevE_np_D0)
+summary(sim2_res_a1$median_OR_a)
+sim2_median_OR_a1 <- median(sim2_res_a1$median_OR_a)
+quantile(sim2_res_a1$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim2_MSE_a1 <- mean((log(sim2_res_a1$median_OR_a) - log(true_RR))^2)
+sim2_MSE_a1
+sum(sim2_res_a1$coverage_a)/length(sim2_res_a1$coverage_a)
+sim2_coverage_a1 <- sum(sim2_res_a1$coverage_a)/length(sim2_res_a1$coverage_a)
+
+## random uniform (bounded by prevE_p_1 & prevE_p_D0)
+summary(sim2_res_a2$median_OR_a)
+sim2_median_OR_a2 <- median(sim2_res_a2$median_OR_a)
+quantile(sim2_res_a2$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim2_MSE_a2 <- mean((log(sim2_res_a2$median_OR_a) - log(true_RR))^2)
+sim2_MSE_a2
+sum(sim2_res_a2$coverage_a)/length(sim2_res_a2$coverage_a)
+sim2_coverage_a2 <-sum(sim2_res_a2$coverage_a)/length(sim2_res_a2$coverage_a)
+
+## random uniform (0-1)
+summary(sim2_res_a3$median_OR_a)
+sim2_median_OR_a3 <- median(sim2_res_a3$median_OR_a)
+quantile(sim2_res_a3$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim2_MSE_a3 <- mean((log(sim2_res_a3$median_OR_a) - log(true_RR))^2)
+sim2_MSE_a3
+sum(sim2_res_a3$coverage_a)/length(sim2_res_a3$coverage_a)
+sim2_coverage_a3 <-sum(sim2_res_a3$coverage_a)/length(sim2_res_a3$coverage_a)
+
+## random uniform (0.1-0.4)
+summary(sim2_res_a4$median_OR_a)
+sim2_median_OR_a4 <- median(sim2_res_a4$median_OR_a)
+quantile(sim2_res_a4$median_OR_a, probs=c(0.025, 0.5, 0.975))
+sim2_MSE_a4 <- (mean((log(sim2_res_a4$median_OR_a) - log(true_RR))^2))
+sim2_MSE_a4
+sum(sim2_res_a4$coverage_a)/length(sim2_res_a4$coverage_a)
+sim2_coverage_a4 <-sum(sim2_res_a4$coverage_a)/length(sim2_res_a4$coverage_a)
+```
