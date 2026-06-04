@@ -1,0 +1,182 @@
+---
+title: "Bias Adjustment - Retrospective Case Control Studies"
+author: Huda Bashir
+date: "Last compiled on `r format(Sys.Date(), '%B %d, %Y')`"
+format: html
+embed-resources: true
+self-contained: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+#| echo: false
+#| include: false
+library(dplyr)
+library(tidyverse)
+library(trapezoid)
+library(metafor)
+```
+Building the bias-adjustment function
+```{r}
+APP_FUN <- function(niter, RR, pD1E1, pD1E0, pD0E1, pD0E0, prD1, prD0, adj_OR) {
+  
+  #### CALCULATING BIASED OR ESTIMATE
+  OR_b <- (pD1E1/pD1E0)/(pD0E1/pD0E0)
+  bias_conf <- OR_b/adj_OR ## calculating bias due to confounding
+
+  #### CALCULATING EXPECTED TOTAL ELIGIBLE NON-PARTICIPATING CASES/CONTROLS
+  D1 <- round((pD1E1 + pD1E0)/prD1)
+  D0 <- round((pD0E1 + pD0E0)/prD0)
+  
+  npD1 <- D1 - pD1E1 - pD1E0
+  npD0 <- D0 - pD0E1 - pD0E0
+  
+  #### CALCULATING EXPOSURE PREVALENCE AMONG PARTICIPATING CASES
+  prevE_p_D1 <- pD1E1/(pD1E1 + pD1E0)
+  prevE_p_D0 <- pD0E1/(pD0E1 + pD0E0)
+  
+  #### DATA GENERATION FOR RANDOM TRAPEZOIDAL BIAS ADJUSTMENT (min = 0, max = 1)
+  ## Exposure prevalence for non-participating cases
+  expprev_np_D1_r1 <- rtrapezoid(niter,
+                                 min = 0,
+                                 mode1 = ifelse(prevE_p_D1 < prevE_p_D0, prevE_p_D1, prevE_p_D0),
+                                 mode2 = ifelse(prevE_p_D0 > prevE_p_D1, prevE_p_D0, prevE_p_D1),
+                                 max = 1)
+  ## Exposure prevalence for non-participating controls
+  expprev_np_D0_r1 <- rtrapezoid(niter,
+                                 min = 0,
+                                 mode1 = ifelse(prevE_p_D1 < prevE_p_D0, prevE_p_D1, prevE_p_D0),
+                                 mode2 = ifelse(prevE_p_D0 > prevE_p_D1, prevE_p_D0, prevE_p_D1),
+                                 max = 1)
+  
+  npD1E1_a <- rbinom(niter, npD1, expprev_np_D1_r1) ## Generating number of exposed cases
+  npD1E0_a <- npD1 - npD1E1_a ## Generating number of unexposed cases
+  npD0E1_a <- rbinom(niter, npD0, expprev_np_D0_r1) ## Generating number of exposed controls
+  npD0E0_a <- npD0 - npD0E1_a ## Generating number of unexposed controls
+  
+  #### CALCULATING BIAS-ADJUSTED OR
+  rannorm <- rnorm(niter, mean = 0, sd = 1) ## calculating random error
+  OR_a <- ((pD1E1 + npD1E1_a) / (pD1E0 + npD1E0_a)) / ((pD0E1 + npD0E1_a) / (pD0E0 + npD0E0_a)) ## bias-adjusted estimate without considering random error or bias due to confounding
+  L_SERR_a <- sqrt((1/(pD1E1))+(1/(pD1E0)) + (1/(pD0E1)) + (1/(pD0E0))) ## calculating standard error with random error
+  OR_a2  <- (exp(log(OR_a)+(rannorm*L_SERR_a))) ## bias-adjusted estimate with random error
+  OR_a3 <- OR_a2/bias_conf ## bias-adjusted estimate with random error and bias due to confounding
+
+  ## SAVING RESULTS
+  adj <- data.frame(OR_a3)
+
+  return(list(adj = adj))
+}
+```
+## Sandler et al. 1985
+- Cases marginal participation = 60/76
+- Controls marginal participation = 518/798
+- Reported OR (manuscript) = 1.62
+```{r}
+set.seed(seed = 23) 
+app_Sandler <- APP_FUN(niter = 100000, RR = 1.07,  pD1E1 = 19, pD1E0 = 13, pD0E1 = 76, pD0E0 = 101, prD1 = 60/76, prD0 = 518/798, adj_OR = 1.62)
+
+Sandler_adj <- app_Sandler$adj
+
+## bias-adjusted OR
+summary(Sandler_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Sandler_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Smith et al. 1994
+- Cases marginal participation = 208/547
+- Controls marginal participation = 201/440
+- Reported OR (manuscript) = 1.58
+```{r}
+set.seed(seed = 23)
+app_Smith <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 46, pD1E0 = 48, pD0E1 = 37, pD0E0 = 63, prD1 = 208/(393/0.719), prD0 = 201/(393/0.894), adj_OR = 1.58)
+  
+Smith_adj <- app_Smith$adj
+
+## bias-adjusted OR
+summary(Smith_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Smith_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Morabia et al. 1996
+- Cases marginal participation = 71%
+- Controls marginal participation = 70%
+- Reported OR (manuscript) = 3.1
+```{r}
+set.seed(seed = 23) 
+app_Morabia <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 62, pD1E0 = 28, pD0E1 = 214, pD0E0 = 241, prD1 = 0.71, prD0 = 0.70, adj_OR = 3.1)
+
+Morabia_adj <- app_Morabia$adj
+
+## bias-adjusted OR
+summary(Morabia_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Morabia_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Alberg et al. 2004
+- Cases marginal participation = 104/115
+- Controls marginal participation = 100/115
+- Reported OR (manuscript) = 1.20
+```{r}
+set.seed(seed = 23) 
+app_Alberg <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 32, pD1E0 = 30, pD0E1 = 32, pD0E0 = 34, prD1 = 104/115, prD0 = 100/115, adj_OR = 1.20)
+
+Alberg_adj <- app_Alberg$adj
+
+## bias-adjusted OR
+summary(Alberg_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Alberg_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Shrubsole et al. 2004
+- Cases marginal participation = 1459/1602
+- Controls marginal participation = 1556/1724
+- Reported OR (manuscript) = 1.0
+```{r}
+set.seed(seed = 23) 
+app_Shrubsole <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 604, pD1E0 = 409, pD0E1 = 699, pD0E0 = 418, prD1 = 1459/1602, prD0 = 1556/1724, adj_OR = 1.0)
+
+Shrubsole_adj <- app_Shrubsole$adj
+
+## bias-adjusted OR
+summary(Shrubsole_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Shrubsole_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Roddam et al. 2007
+- Cases marginal participation = 644/838
+- Controls marginal participation = 588/644
+- Reported OR (manuscript) = 0.89
+```{r}
+set.seed(seed = 23) 
+app_Roddam <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 122, pD1E0 = 175, pD0E1 = 135, pD0E0 = 175, prD1 = 644/838, prD0 = 588/644, adj_OR = 0.89)
+
+Roddam_adj <- app_Roddam$adj
+
+## bias-adjusted OR
+summary(Roddam_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Roddam_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Nishino et al. 2014
+- Cases marginal participation = 94.4%
+- Controls marginal participation = 89.6%
+- Reported OR (manuscript) = 1.09
+```{r}
+set.seed(seed = 23) 
+app_Nishino <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 507, pD1E0 = 266, pD0E1 = 1313, pD0E0 = 744, prD1 = 0.944, prD0 = 0.896, adj_OR = 1.09)
+
+Nishino_adj <- app_Nishino$adj
+
+## bias-adjusted OR
+summary(Nishino_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Nishino_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
+## Tong et al. 2014
+- Cases marginal participation = 319/327
+- Controls marginal participation = 329/339
+- Reported OR (manuscript) = 1.46
+```{r}
+set.seed(seed = 23) 
+app_Tong <- APP_FUN(niter = 100000, RR = 1.07, pD1E1 = 185, pD1E0 = 127, pD0E1 = 151, pD0E0 = 161, prD1 = 319/327, prD0 = 329/339, adj_OR = 1.46)
+
+Tong_adj <- app_Tong$adj
+
+## bias-adjusted
+summary(Tong_adj$OR_a3) ## adjusting for confounding + random error
+quantile(Tong_adj$OR_a3, probs = c(0.025, 0.5, 0.975))
+```
