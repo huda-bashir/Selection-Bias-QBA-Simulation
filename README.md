@@ -1,7 +1,9 @@
 # Selection Bias Quantitative Bias (QBA) Simulation
 
 Author: Huda Bashir
+
 PhD Candidate at Emory University
+
 huda.bashir@emory.edu
 
 This repository contains supplementary material for the manuscript "Using Probabilistic Bias Analysis to Adjust for Selection Bias in Retrospective Case-Control Studies" published in _Insert Journal & DOI here_.
